@@ -33,6 +33,8 @@ CONF_DEVICE_CODE = 'device_code'
 CONF_CONTROLLER_DATA = "controller_data"
 CONF_DELAY = "delay"
 CONF_POWER_SENSOR = 'power_sensor'
+CONF_FANSPEED_SENSOR = 'fan_speed'
+CONF_POWER_SENSOR_RESTORE_STATE = 'power_sensor_restore_state'
 
 SPEED_OFF = "off"
 
@@ -42,7 +44,8 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Required(CONF_DEVICE_CODE): cv.positive_int,
     vol.Required(CONF_CONTROLLER_DATA): cv.string,
     vol.Optional(CONF_DELAY, default=DEFAULT_DELAY): cv.string,
-    vol.Optional(CONF_POWER_SENSOR): cv.entity_id
+    vol.Optional(CONF_POWER_SENSOR): cv.entity_id,
+    vol.Optional(CONF_FANSPEED_SENSOR): cv.entity_id
 })
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
@@ -93,7 +96,8 @@ class SmartIRFan(FanEntity, RestoreEntity):
         self._device_code = config.get(CONF_DEVICE_CODE)
         self._controller_data = config.get(CONF_CONTROLLER_DATA)
         self._delay = config.get(CONF_DELAY)
-        self._power_sensor = config.get(CONF_POWER_SENSOR)
+        self._power_sensor = config.get(CONF_POWER_SENSOR)\
+        self._fan_speed_sensor = config.get(CONF_FANSPEED_SENSOR)
 
         self._manufacturer = device_data['manufacturer']
         self._supported_models = device_data['supportedModels']
@@ -110,6 +114,7 @@ class SmartIRFan(FanEntity, RestoreEntity):
         self._preset_modes = None
         self._mode_index = None
         self._preset_mode = None
+        self._power = None
         self._support_flags = SUPPORT_SET_SPEED
         if (DIRECTION_REVERSE in self._commands and \
             DIRECTION_FORWARD in self._commands):
@@ -163,6 +168,12 @@ class SmartIRFan(FanEntity, RestoreEntity):
             if self._power_sensor:
                 async_track_state_change(self.hass, self._power_sensor, 
                                          self._async_power_sensor_changed)
+            if self._fan_speed_sensor:
+                async_track_state_change(self.hass, self._fan_speed_sensor, 
+                                         self._async_fan_speed_changed)
+                fan_speed_sensor_state = self.hass.states.get(self._fan_speed_sensor)
+                if fan_speed_sensor_state and fan_speed_sensor_state.state != STATE_UNKNOWN:
+                    self._async_update_fan_speed(fan_speed_sensor_state)
 
     @property
     def unique_id(self):
@@ -344,3 +355,36 @@ class SmartIRFan(FanEntity, RestoreEntity):
             if self._speed != SPEED_OFF:
                 self._speed = SPEED_OFF
             await self.async_update_ha_state()
+
+    async def _async_fan_speed_sensor_changed(self, entity_id, old_state, new_state):
+        """Handle fan speed sensor changes."""
+        if new_state is None:
+            return
+
+        self._async_update_fan_speed(new_state)
+        await self.async_update_ha_state()
+
+    @callback
+    def _async_update_fan_speed(self, state):
+        """Update fan speed with latest state from fan speed sensor."""
+        try:
+            if state.state != STATE_UNKNOWN and state.state != STATE_UNAVAILABLE:       
+                self._power = float(state.state)
+                if self._power == 0:
+                    self._speed = SPEED_OFF
+                else:
+                    direction = self._direction or 'default'
+                    for index, speed in enumerate(self._speed_list):
+                        if speed == self._speed_list[-1]: 
+                            self._speed = speed
+                            break
+                        if self._power < (self._commands[direction][speed]):
+                            if index == 0:
+                                self._speed = SPEED_OFF
+                            else:
+                                self._speed = self._speed_list[index-1]
+                self._last_speed = self._speed
+                if not self._speed == SPEED_OFF:
+                    self._last_on_speed = self._speed
+        except ValueError as ex:
+            _LOGGER.error("Unable to update from fan speed sensor: %s", ex)    
